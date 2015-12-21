@@ -18,18 +18,25 @@ package azkaban.jobtype.javautils;
 
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
+import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.URL;
 import java.net.URLDecoder;
 import java.util.Enumeration;
 
+import org.apache.avro.Schema;
+import org.apache.avro.file.DataFileStream;
+import org.apache.avro.generic.GenericDatumReader;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FileStatus;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.mapred.FileInputFormat;
 import org.apache.hadoop.mapred.JobConf;
+import org.apache.log4j.ConsoleAppender;
+import org.apache.log4j.Level;
 import org.apache.log4j.Logger;
+import org.apache.log4j.PatternLayout;
 
 import azkaban.utils.Props;
 
@@ -135,5 +142,110 @@ public class HadoopUtils {
     } finally {
       output.close();
     }
+  }
+
+  /**
+   * Compute split size to control number of Mappers.
+   * @param fs
+   * @param inputPath
+   * @param concurrency
+   * @return
+   * @throws IOException
+   */
+  public static long computeSplitSize(FileSystem fs, Path inputPath, long concurrency) throws IOException {
+    if(concurrency <= 0L) {
+      throw new IllegalArgumentException("Concurrency level should be positive number");
+    }
+    long sum = 0L;
+    for(FileStatus fileStatus : fs.listStatus(inputPath)) {
+      if(!fileStatus.isDir()) {
+        long bytes = fileStatus.getLen();
+        if (Long.MAX_VALUE - bytes <= sum) { //Overflow case.
+          sum = Long.MAX_VALUE;
+          break;
+        }
+        sum += fileStatus.getLen();
+      }
+    }
+    logger.info("Total file size: " + sum + " bytes");
+    return sum / concurrency;
+  }
+
+  public static Schema getAvroSchemaFromAvro(FileSystem fs, Path path) throws IOException {
+    if(!fs.exists(path)) {
+      throw new IllegalArgumentException("Path " + path + " does not exist. Cannot extract Avro schema.");
+    }
+    if(fs.isFile(path)) {
+      DataFileStream<Object> stream = null;
+      try {
+        stream = createAvroDataStream(fs, path);
+        Schema schema = stream.getSchema();
+        stream.close();
+        return schema;
+      } finally {
+        if(stream != null) {
+          stream.close();
+        }
+      }
+    }
+
+    //Path is directory
+    Throwable t = null;
+    for(FileStatus fileStatus : fs.listStatus(path)) {
+      if(!fileStatus.isDir()) { //This method is not responsible for below 2nd level sub directories.
+        if(!fileStatus.getPath().getName().endsWith(".avro")) {
+          continue;
+        }
+        try {
+          return getAvroSchemaFromAvro(fs, fileStatus.getPath());
+        } catch (Exception e) {
+          logger.warn("Failed to get Schema from " + fileStatus.getPath(), e);
+          t = e;
+        }
+      }
+    }
+    throw new RuntimeException("Failed to create Schema using path " + path, t);
+  }
+
+  private static DataFileStream<Object> createAvroDataStream(FileSystem fs, Path path)
+      throws IOException {
+    if (logger.isDebugEnabled()) {
+      logger.debug("path:" + path.toUri().getPath());
+    }
+
+    GenericDatumReader<Object> avroReader = new GenericDatumReader<Object>();
+    InputStream hdfsInputStream = null;
+    try {
+      hdfsInputStream = fs.open(path);
+    } catch (IOException e) {
+      throw e;
+    }
+
+    DataFileStream<Object> avroDataFileStream = null;
+    try {
+      avroDataFileStream =
+          new DataFileStream<Object>(hdfsInputStream, avroReader);
+    } catch (IOException e) {
+      if (hdfsInputStream != null) {
+        hdfsInputStream.close();
+      }
+      throw e;
+    }
+    return avroDataFileStream;
+  }
+
+  public static Schema getSchema(FileSystem fs, Path schemaPath) throws IOException {
+    if(!fs.exists(schemaPath) && !fs.isFile(schemaPath)) {
+      throw new IllegalArgumentException("Schema file is not found.");
+    }
+    return new Schema.Parser().parse(fs.open(schemaPath));
+  }
+
+  public static void setLoggerOnNodes() {
+    ConsoleAppender appender = new ConsoleAppender(new PatternLayout("%d{yyyy-MM-dd HH:mm:ss} %-5p %c:%L - %m%n"));
+    appender.activateOptions();
+    Logger.getRootLogger().removeAllAppenders();
+    Logger.getRootLogger().addAppender(appender);
+    Logger.getRootLogger().setLevel(Level.INFO);
   }
 }

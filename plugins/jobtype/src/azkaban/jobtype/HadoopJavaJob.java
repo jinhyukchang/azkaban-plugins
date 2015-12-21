@@ -19,13 +19,10 @@ package azkaban.jobtype;
 import static org.apache.hadoop.security.UserGroupInformation.HADOOP_TOKEN_FILE_LOCATION;
 
 import java.io.File;
-import java.security.PrivilegedExceptionAction;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.Properties;
 import java.util.StringTokenizer;
 
-import org.apache.hadoop.security.UserGroupInformation;
 import org.apache.log4j.Logger;
 
 import azkaban.flow.CommonJobProperties;
